@@ -1042,9 +1042,7 @@ pub fn launch(
             Check::NoAnswer(e, secrets) => (None, Some(e), secrets),
         };
         if plays {
-            pass.session = renewed
-                .as_ref()
-                .map(|a| (a.clone(), secrets.clone()));
+            pass.session = renewed.as_ref().map(|a| (a.clone(), secrets.clone()));
             pass.offline = said;
         }
         if secrets.owns {
@@ -1159,7 +1157,12 @@ impl SignIn {
 /// the account plays offline this time, if it does.
 pub fn session_for_game(game_home: &Path) -> (Option<PathBuf>, Option<String>) {
     let mut accounts = Accounts::load();
-    let pass = launch(&Endpoints::live(), client_id().as_deref(), store(), &mut accounts);
+    let pass = launch(
+        &Endpoints::live(),
+        client_id().as_deref(),
+        store(),
+        &mut accounts,
+    );
     let _ = accounts.save();
     let Some((account, secrets)) = pass.session else {
         return (None, pass.offline);

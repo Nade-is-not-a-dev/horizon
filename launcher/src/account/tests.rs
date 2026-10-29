@@ -427,9 +427,11 @@ fn no_network_never_blocks_a_past_owner() {
         ..secrets("mc-token", true)
     };
     let mut accounts = signed_in(&store, &stale);
-    assert!(launch(&offline(), Some("test-client"), &store, &mut accounts)
-        .session
-        .is_none());
+    assert!(
+        launch(&offline(), Some("test-client"), &store, &mut accounts)
+            .session
+            .is_none()
+    );
     assert!(launch(&offline(), None, &store, &mut accounts)
         .session
         .is_none());
@@ -480,17 +482,23 @@ fn any_owner_is_found_and_the_one_who_plays_brings_the_session() {
 fn offline_names_play_with_or_without_an_account() {
     let store = MemoryStore::default();
     let mut accounts = Accounts::default();
-    accounts.play_as(Player::Offline("Builder_1".into())).unwrap();
+    accounts
+        .play_as(Player::Offline("Builder_1".into()))
+        .unwrap();
     assert_eq!(accounts.player(), Player::Offline("Builder_1".into()));
     assert_eq!(accounts.name_arg(), Some("Builder_1"));
     // Beside a signed-in account, and after signing every account out: the name stays.
     let mut accounts = signed_in(&store, &secrets("mc-token", true));
-    accounts.play_as(Player::Offline("Builder_1".into())).unwrap();
+    accounts
+        .play_as(Player::Offline("Builder_1".into()))
+        .unwrap();
     accounts.remove(&store, UUID).unwrap();
     assert_eq!(accounts.offline, ["Builder_1"]);
     assert_eq!(accounts.player(), Player::Offline("Builder_1".into()));
     assert!(!accounts.has_owner(&store));
-    accounts.play_as(Player::Offline("Builder_2".into())).unwrap();
+    accounts
+        .play_as(Player::Offline("Builder_2".into()))
+        .unwrap();
     assert_eq!(accounts.player(), Player::Offline("Builder_2".into()));
 }
 
@@ -498,7 +506,9 @@ fn offline_names_play_with_or_without_an_account() {
 fn an_offline_name_starts_without_asking_anything() {
     let store = MemoryStore::default();
     let mut accounts = Accounts::default();
-    accounts.play_as(Player::Offline("Builder_1".into())).unwrap();
+    accounts
+        .play_as(Player::Offline("Builder_1".into()))
+        .unwrap();
     let (m, ep) = mock(|_| {});
     let pass = launch(&ep, Some("test-client"), &store, &mut accounts);
     assert!(pass.session.is_none() && pass.owner.is_none() && pass.offline.is_none());
@@ -684,13 +694,11 @@ fn offline_names_switch_with_accounts() {
     };
     assert_eq!(a.player(), Player::Microsoft("abc".into()));
     assert_eq!(a.name_arg(), None);
-    a.play_as(Player::Offline("Builder_1".into()))
-        .unwrap();
+    a.play_as(Player::Offline("Builder_1".into())).unwrap();
     assert_eq!(a.player(), Player::Offline("Builder_1".into()));
     assert_eq!(a.name_arg(), Some("Builder_1"));
     // Kept once, as first written, whatever the case.
-    a.play_as(Player::Offline("builder_1".into()))
-        .unwrap();
+    a.play_as(Player::Offline("builder_1".into())).unwrap();
     assert_eq!(a.offline, ["Builder_1"]);
     assert_eq!(a.name_arg(), Some("Builder_1"));
     assert!(a.add_offline("no spaces").is_err());
@@ -699,8 +707,7 @@ fn offline_names_switch_with_accounts() {
     a.play_as(Player::Microsoft("abc".into())).unwrap();
     assert_eq!(a.name_arg(), None, "an account plays with its own name");
     assert!(a.play_as(Player::Microsoft("zzz".into())).is_err());
-    a.play_as(Player::Offline("Builder_1".into()))
-        .unwrap();
+    a.play_as(Player::Offline("Builder_1".into())).unwrap();
     // Forgetting drops the look and the name's skin and cape files too.
     let dir = std::env::temp_dir().join(format!("horizon-accounts-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);

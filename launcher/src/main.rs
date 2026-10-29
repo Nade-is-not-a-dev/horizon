@@ -2332,10 +2332,7 @@ impl Launcher {
                     .top(px(17.))
                     .child(blocks::icon("play", 22., t.on_face)),
             );
-        match play_press(
-            prepared || java.is_some(),
-            self.preparing || running,
-        ) {
+        match play_press(prepared || java.is_some(), self.preparing || running) {
             PlayPress::Nothing => play = disabled(play),
             PlayPress::Play => {
                 play = play.on_click(cx.listener(|this, _: &ClickEvent, _, cx| {

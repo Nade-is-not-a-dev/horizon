@@ -10,8 +10,10 @@ const OLD_REFUSAL: &str = "Sign in with a Microsoft account that owns Minecraft:
 
 /// Fresh homes with one installed (not prepared) version and an offline name.
 fn home(name: &str) -> PathBuf {
-    let root =
-        std::env::temp_dir().join(format!("horizon-play-offline-{name}-{}", std::process::id()));
+    let root = std::env::temp_dir().join(format!(
+        "horizon-play-offline-{name}-{}",
+        std::process::id()
+    ));
     let _ = std::fs::remove_dir_all(&root);
     let version = root.join("launcher/versions/v2026.10.27.01");
     std::fs::create_dir_all(&version).unwrap();
