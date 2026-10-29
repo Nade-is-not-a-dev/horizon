@@ -125,8 +125,11 @@ jobs:
       HORIZON_CURSEFORGE_API_KEY: ${{ secrets.HORIZON_CURSEFORGE_API_KEY }}
       # The release's version and tag, built in (launcher/src/backend.rs VERSION and own_tag: the tag says which
       # line it is on, docs/versioning.md); a launcher branch's build keeps Cargo.toml's.
-      HORIZON_LAUNCHER_VERSION: ${{ (github.event_name != 'push' || github.ref == 'refs/heads/main') && needs.decide.outputs.version || '' }}
-      HORIZON_LAUNCHER_TAG: ${{ (github.event_name != 'push' || github.ref == 'refs/heads/main') && needs.decide.outputs.tag || '' }}
+      # Fork: this repo has no launcher releases of its own, so decide would stamp 0.2.0 and the
+      # launcher would offer the official build as an update. The fork stamps its own version
+      # instead (kept in step with launcher/Cargo.toml), so it always counts as current.
+      HORIZON_LAUNCHER_VERSION: "0.2.99"
+      HORIZON_LAUNCHER_TAG: "launcher@0.2.99"
     defaults:
       run:
         working-directory: launcher
