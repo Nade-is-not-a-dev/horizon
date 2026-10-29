@@ -1252,8 +1252,8 @@ fn download_for_owner(
     log: &dyn Fn(String),
 ) -> Result<(), String> {
     let mut accounts = account::Accounts::load();
-    // The strict gate, never `launch_for_game`: the developer option that lets offline names
-    // play without an owner must not download the game for them.
+    // A download asks the strict question: only an account the services say owns the game now,
+    // never one that merely played offline.
     let pass = account::launch(
         &account::Endpoints::live(),
         account::client_id().as_deref(),
@@ -1287,22 +1287,22 @@ pub fn download_version_for_owner(
     Ok(dir)
 }
 
-/// What [`download_for_owner`] does with the owner gate's answer: Mojang's files only for its
+/// What [`download_for_owner`] does with what the services answered: Mojang's files only for its
 /// `owner`, an account the services said owns the game just now.
 fn download_for(
     pins: &sources::Pins,
     dir: &Path,
-    pass: Result<account::Launch, account::NoOwner>,
+    pass: account::Launch,
     signed_in: bool,
     fetch: sources::Fetch,
     log: &dyn Fn(String),
 ) -> Result<(), String> {
     let v = &pins.version;
     match pass {
-        Ok(account::Launch {
+        account::Launch {
             owner: Some((owner, _)),
             ..
-        }) => {
+        } => {
             let name = owner.name;
             log(format!(
                 "{name} owns Minecraft: downloading {v} from Mojang"
@@ -1316,17 +1316,19 @@ fn download_for(
                 format!("\n  • Horizon tried to download {v} from Mojang for {name}, but: {e}")
             })
         }
-        // An owner by its last answer, who can't be asked now.
-        Ok(pass) => Err(format!(
+        // Nothing verifiable now (an owner by its last answer, or an account that left):
+        // say what went wrong.
+        account::Launch {
+            offline: Some(why), ..
+        } => Err(format!(
             "\n  • Downloading {v} from Mojang needs your Microsoft account, which could not be \
-             checked: {}",
-            pass.offline.unwrap_or_default()
+             checked: {why}"
         )),
-        Err(_) if signed_in => Err(
+        account::Launch { .. } if signed_in => Err(
             "\n  • No signed-in account owns Minecraft: Java Edition, so Horizon can't download it."
                 .into(),
         ),
-        Err(_) => Err(format!(
+        account::Launch { .. } => Err(format!(
             "\n  • Or sign in with the Microsoft account that owns Minecraft: Horizon then \
              downloads {v} from Mojang itself."
         )),
@@ -1997,12 +1999,10 @@ pub fn need_prepared(tag: &str) -> Result<(), String> {
     }
 }
 
-/// The client's command, once the owner gate lets it start and its resources are prepared. Past
-/// the gate, a sign-in that can't be renewed (no network, expired) still lets the game start,
-/// offline.
+/// The client's command, once its resources are prepared. A sign-in that can't be renewed (no
+/// network, expired) still lets the game start, offline.
 pub fn client(tag: &str) -> Result<Command, String> {
-    let (session, offline) = account::session_for_game(&game_home(), false)
-        .map_err(|refused| format!("{refused} Sign in with `horizon-launcher account sign-in`."))?;
+    let (session, offline) = account::session_for_game(&game_home());
     need_prepared(tag)?;
     complete_assets(tag);
     crate::browser::horizon::before_play(&game_home());
@@ -2571,11 +2571,9 @@ pub enum Msg {
     Reused(Vec<(String, String)>),
     /// Whether secrets are kept in the OS keychain (else only until the launcher closes).
     Keychain(bool),
-    /// Whether an account in the launcher owned the game at its last check (the owner gate).
-    Owner(bool),
-    /// The owner gate's answer for the game about to start: the selected account's session
-    /// file (none = offline) and why it plays offline, if it does.
-    Session(Result<(Option<PathBuf>, Option<String>), crate::account::NoOwner>),
+    /// The selected account's session file for the game about to start (none = offline) and why
+    /// it plays offline, if it does.
+    Session((Option<PathBuf>, Option<String>)),
     /// A modpack step's line (`modpacks`).
     PackLine(String),
     /// A modpack step ended: the pack as it now is.
@@ -2744,10 +2742,6 @@ pub struct Settings {
     /// first-run question, or on the Play page once if they answered that before it existed.
     #[serde(default)]
     pub ping_notice_seen: bool,
-    /// The player without an account that owns the game has read, once, why the launcher needs
-    /// one now (the owner gate's screen).
-    #[serde(default)]
-    pub owner_notice_seen: bool,
     /// Seconds the sidebar's partner banner has been on screen, over every start, up to
     /// `partner::SEEN_BEFORE_HIDE`: only then can the player hide it.
     #[serde(default)]
@@ -2772,12 +2766,6 @@ pub struct Settings {
     /// a game of their own. Off by default.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub native_mods: bool,
-    /// Developer options (hidden: seven clicks on the sidebar's launcher version reveal them):
-    /// offline names play without an account that owns the game, in the window only
-    /// (`account::Accounts::play_as_with`, `account::launch_for_game`). Never a download: the game still
-    /// comes from the player's own install. Off by default, and absent from the file while off.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub dev_offline: bool,
 }
 
 impl Settings {
@@ -2869,8 +2857,8 @@ mod tests {
     }
 
     /// The launcher downloads Mojang's game files (client jar, libraries, assets) only for an
-    /// account the services said owns the game: never without one, and never past the gate by
-    /// the developer option (`Settings::dev_offline`), whose pass has no owner.
+    /// account the services said owns the game: never without one, and never for a launch that
+    /// came back without an owner.
     #[test]
     fn mojang_downloads_only_for_an_owner() {
         let dir = std::env::temp_dir().join(format!("horizon-owner-only-{}", std::process::id()));
@@ -2887,13 +2875,8 @@ mod tests {
             Err("no network in tests".into())
         };
         let log = |_: String| {};
-        let no_owner = || Ok(account::Launch::default());
-        for (pass, signed_in) in [
-            (Err(account::NoOwner), false),
-            (Err(account::NoOwner), true),
-            (no_owner(), false),
-            (no_owner(), true),
-        ] {
+        for signed_in in [false, true] {
+            let pass = account::Launch::default();
             assert!(download_for(&pins, &dir, pass, signed_in, &fetch, &log).is_err());
         }
         assert!(asked.lock().unwrap().is_empty());
@@ -2909,10 +2892,10 @@ mod tests {
             r#"{"refresh_token":"r","minecraft_token":"t","minecraft_expires_at":1,"owns":true}"#,
         )
         .unwrap();
-        let pass = Ok(account::Launch {
+        let pass = account::Launch {
             owner: Some((owner, secrets)),
             ..Default::default()
-        });
+        };
         assert!(download_for(&pins, &dir, pass, true, &fetch, &log).is_err());
         assert!(!asked.lock().unwrap().is_empty());
         let _ = fs::remove_dir_all(&dir);
@@ -2951,7 +2934,6 @@ mod tests {
         };
         assert!(body("download_for").contains("mojang::download("));
         assert!(body("download_for_owner").contains("account::launch("));
-        assert!(!body("download_for_owner").contains("launch_for_game("));
         // `download_for` is defined once and called once, by `download_for_owner`.
         assert_eq!(backend.matches("download_for(").count(), 2);
         assert!(body("download_for_owner").contains("download_for("));
