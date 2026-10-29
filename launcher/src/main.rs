@@ -168,6 +168,10 @@ struct Launcher {
     /// The version being deleted on a background thread. It is already out of `installed`, so
     /// nothing can launch, select or prepare it, and its row can't install or remove it again.
     removing: Option<String>,
+    /// What each installed version takes on disk, measured on a thread for the Versions page, and
+    /// the installed list it was measured for.
+    disk: Vec<(String, u64)>,
+    disk_for: Vec<String>,
     install_error: Option<(String, String)>,
     /// Native mods (`native_mods`): the build's step while it runs, why it failed, and the
     /// warning before a build while it is open, with the mods it names.
@@ -206,7 +210,8 @@ struct Launcher {
     sign_in: Option<SignIn>,
     sign_in_state: Option<SignInState>,
     keychain: bool,
-    /// The game is waiting for its session (a token renewal) before it starts.
+    /// The game is waiting for its session (a token renewal), or a Java instance for its files
+    /// and Java (`start_java`), before it starts.
     starting_client: Option<String>,
     /// Play was pressed on a version not prepared yet: it starts once this preparation ends well.
     play_when_prepared: Option<String>,
@@ -380,6 +385,8 @@ impl Launcher {
             installed,
             installing: None,
             removing: None,
+            disk: Vec::new(),
+            disk_for: Vec::new(),
             install_error: None,
             native_step: None,
             native_error: None,
@@ -653,6 +660,20 @@ impl Launcher {
                 Msg::Reused(_) => self.installed = backend::installed(),
                 Msg::Keychain(persistent) => self.keychain = persistent,
                 Msg::Playing(playing) => self.playing = playing,
+                Msg::JavaGame(id, home, cmd) => {
+                    self.starting_client = None;
+                    match cmd.and_then(|cmd| backend::spawn(Job::Client, cmd, self.tx.clone())) {
+                        Ok(r) => {
+                            self.client = Some(r);
+                            self.client_home = Some(home);
+                            self.client_run = Some((id, Instant::now()));
+                            self.step_aside(cx);
+                        }
+                        Err(e) => {
+                            self.client_error = Some(e);
+                        }
+                    }
+                }
                 Msg::Session(session) => {
                     if let Some(tag) = self.starting_client.take() {
                         let mut cmd = backend::client_command(&tag);
@@ -744,6 +765,11 @@ impl Launcher {
                                 self.settings.selected = Some(tag);
                             }
                             self.settings.save();
+                            // After the save: the selected version is never pruned.
+                            let tx = self.tx.clone();
+                            std::thread::spawn(move || {
+                                let _ = tx.send(Msg::Pruned(backend::prune_old_versions()));
+                            });
                         }
                         Err(e) => self.install_error = Some((tag, e)),
                     }
@@ -757,6 +783,12 @@ impl Launcher {
                         selection_after_removal(&self.installed, Settings::load().selected);
                     if let Err(e) = result {
                         self.install_error = Some((tag, e));
+                    }
+                }
+                Msg::DiskUse(disk) => self.disk = disk,
+                Msg::Pruned(gone) => {
+                    if !gone.is_empty() {
+                        self.installed = backend::installed();
                     }
                 }
                 Msg::Updates(Ok(updates)) => {
@@ -801,6 +833,8 @@ impl Launcher {
                     }
                 }
                 Msg::PackDone(result) => self.pack_done(result),
+                // Old versions log their session; it never reaches the window.
+                Msg::Line(_, line) if line.contains("Session ID is") => {}
                 Msg::Line(job, line) => {
                     if job == Job::Client && line.starts_with(perf::GAME_FIRST_FRAME) {
                         if let Some(pressed) = self.play_pressed.take() {
@@ -1050,14 +1084,64 @@ impl Launcher {
     }
 
     fn play(&mut self) {
+        let java = self
+            .selected_instance()
+            .filter(|i| i.java.is_some())
+            .cloned();
+        if let Some(instance) = java {
+            // Mojang's game: no Horizon version or preparation, only no game already running.
+            // Joining and quick play are Horizon's.
+            self.joining = None;
+            self.quick_play = None;
+            if self.client.is_some() || self.starting_client.is_some() {
+                return;
+            }
+            self.starting_pack = None;
+            self.start_java(instance);
+            return;
+        }
         let Some(tag) = self.selected().cloned() else {
             return;
         };
-        if self.client.is_some() || self.starting_client.is_some() {
+        if !self.can_start(&tag) {
             return;
         }
         self.starting_pack = None;
         self.start_client(tag);
+    }
+
+    /// Starts a Java instance's Minecraft: its files and Java first (downloaded the first time,
+    /// their lines in the log), then `drain` starts the game when the command arrives.
+    fn start_java(&mut self, instance: instances::Instance) {
+        self.client_error = None;
+        self.crash = None;
+        self.prepare_log.clear();
+        self.client_started =
+            Some(std::time::SystemTime::now() - std::time::Duration::from_secs(2));
+        self.starting_client = Some(instance.id.clone());
+        let tx = self.tx.clone();
+        std::thread::spawn(move || {
+            let log = |line: String| {
+                let _ = tx.send(Msg::Line(Job::Client, line));
+            };
+            let cmd = backend::java_game(&instance, &log)
+                .map(|cmd| horizon_launcher::launch::wrap(cmd, &instance.launch));
+            let _ = tx.send(Msg::JavaGame(instance.id, instance.home, cmd));
+        });
+    }
+
+    /// Whether `tag` can start now ([`starts_now`]): prepared, no preparation under way, no game
+    /// running or starting.
+    pub(crate) fn can_start(&self, tag: &str) -> bool {
+        let running = self.client.is_some() || self.starting_client.is_some();
+        starts_now(backend::is_prepared(tag), self.preparing, running)
+    }
+
+    /// Whether the selected instance's version can start now, from a shortcut (a server's Join,
+    /// a world's Play, a friend's code): Horizon's only, never a Java instance.
+    pub(crate) fn can_start_selected(&self) -> bool {
+        self.selected_instance().is_none_or(|i| i.java.is_none())
+            && self.selected().is_some_and(|tag| self.can_start(tag))
     }
 
     /// Starts the game: the session first (a network round trip when the token needs
@@ -1464,6 +1548,13 @@ fn play_press(prepared: bool, busy: bool) -> PlayPress {
     } else {
         PlayPress::PrepareThenPlay
     }
+}
+
+/// Whether a shortcut that starts the game at once (a server's Join, a world's Play, a friend's
+/// code, a pack's Play) starts it now: only when Play would play. Never while a preparation runs:
+/// the game would open on half-written files.
+fn starts_now(prepared: bool, preparing: bool, running: bool) -> bool {
+    play_press(prepared, preparing || running) == PlayPress::Play
 }
 
 /// The selected version once one has been removed: the saved choice if it is still installed,
@@ -2187,7 +2278,13 @@ impl Launcher {
 
     fn play_page(&mut self, banner_width: f32, cx: &mut Context<Self>) -> Div {
         let t = self.theme;
-        let Some(tag) = self.selected().cloned() else {
+        // A Java instance plays Mojang's game: no Horizon version, nothing of Horizon's to prepare.
+        let java = self.selected_instance().and_then(|i| i.java.clone());
+        let Some(tag) = self
+            .selected()
+            .cloned()
+            .or_else(|| java.is_some().then(String::new))
+        else {
             // No hero without a version: the page starts below the top bar like the others.
             return div()
                 .flex()
@@ -2211,8 +2308,13 @@ impl Launcher {
         let prepared = backend::is_prepared(&tag);
         // Prepared without sounds (#1035): Prepare again is the fix, so it stands out.
         let silent = prepared && !backend::has_sounds(&tag);
-        let version = backend::game_version(&tag);
-        let hero = self.hero(&tag, &version, prepared, cx);
+        let version = java
+            .as_ref()
+            .map_or_else(|| backend::game_version(&tag), |j| j.minecraft.clone());
+        let hero = match java {
+            Some(_) => self.hero("", &version, true, cx),
+            None => self.hero(&tag, &version, prepared, cx),
+        };
         let running = self.client.is_some() || self.starting_client.is_some();
         let play_label = if running { "Running" } else { "Play" };
         // The label clears the icon in every language ("Играть" is wider than "Play").
@@ -2230,7 +2332,10 @@ impl Launcher {
                     .top(px(17.))
                     .child(blocks::icon("play", 22., t.on_face)),
             );
-        match play_press(prepared, self.preparing || running) {
+        match play_press(
+            prepared || java.is_some(),
+            self.preparing || running,
+        ) {
             PlayPress::Nothing => play = disabled(play),
             PlayPress::Play => {
                 play = play.on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
@@ -2363,15 +2468,31 @@ impl Launcher {
             .child(section_title("Ready to play", "check", &t).mb(px(12.)))
             .children(self.instance_row(1, cx))
             .children(self.export_panel(cx))
-            .children(self.launch_panel(cx))
-            .child(index_row(
+            .children(self.launch_panel(cx));
+        rows = match &java {
+            Some(java) => rows.child(index_row(
                 2,
-                tr("Resources"),
-                Some(div().child(resources_value).into_any_element()),
-                Some(prepare.into_any_element()),
+                tr("Game"),
+                Some(
+                    div()
+                        .child(trf(
+                            "Minecraft {version} (Java Edition). Play downloads it from Mojang for your account the first time, with the Java it needs.",
+                            &[("version", &java.minecraft)],
+                        ))
+                        .into_any_element(),
+                ),
+                None,
                 &t,
-            ))
-            .child(index_row(
+            )),
+            None => rows
+                .child(index_row(
+                    2,
+                    tr("Resources"),
+                    Some(div().child(resources_value).into_any_element()),
+                    Some(prepare.into_any_element()),
+                    &t,
+                ))
+                .child(index_row(
                 3,
                 tr("Minecraft folder"),
                 Some(minecraft),
@@ -2381,9 +2502,12 @@ impl Launcher {
                         .into_any_element(),
                 ),
                 &t,
-            ));
+            )),
+        };
         {
-            rows = rows.child(self.join_friend_row(prepared && !running, cx));
+            if java.is_none() {
+                rows = rows.child(self.join_friend_row(self.can_start(&tag), cx));
+            }
             // The top bar shows who plays; a row only when there is something to do about it:
             // playing offline.
             if self.accounts.selected().is_none() && account::client_id().is_some() {
@@ -2643,7 +2767,8 @@ impl Launcher {
             .child(body)
     }
 
-    /// The Play page's focal point: what will start, and a line from its notes.
+    /// The Play page's focal point: what will start, and a line from its notes. No `tag`: a Java
+    /// instance's Minecraft.
     fn hero(&self, tag: &str, version: &str, prepared: bool, cx: &mut Context<Self>) -> Div {
         let t = self.theme;
         let summary = match &self.releases {
@@ -2653,7 +2778,11 @@ impl Launcher {
                 .and_then(|r| backend::notes_summary(&r.body)),
             _ => None,
         };
-        let title = "Horizon";
+        let title = if tag.is_empty() {
+            "Minecraft"
+        } else {
+            "Horizon"
+        };
         // Never squeezed by the rows below: the ping notice can make it tall.
         let mut hero = div()
             .flex()
@@ -2798,6 +2927,13 @@ impl Launcher {
                 cx.notify();
             }),
         );
+        let prune = switch("auto-prune", self.settings.auto_prune(), &t).on_click(cx.listener(
+            |this, _: &ClickEvent, _, cx| {
+                this.settings.prune_old_versions = Some(!this.settings.auto_prune());
+                this.settings.save();
+                cx.notify();
+            },
+        ));
         let opening = switch("opening", !self.settings.skip_opening, &t).on_click(cx.listener(
             |this, _: &ClickEvent, _, cx| {
                 this.settings.skip_opening = !this.settings.skip_opening;
@@ -2946,6 +3082,20 @@ impl Launcher {
                             "Your selected version only changes if you were playing the newest one.",
                         )),
                         Some(toggle.into_any_element()),
+                        &t,
+                    ))
+                    .child(index_row(
+                        n + 2,
+                        tr("Delete old versions automatically"),
+                        Some(
+                            div()
+                                .child(trf(
+                                    "Keeps the {count} newest, the one in use and the ones your instances use. Deleted versions install again from the Versions page.",
+                                    &[("count", &self.settings.keep_newest().to_string())],
+                                ))
+                                .into_any_element(),
+                        ),
+                        Some(prune.into_any_element()),
                         &t,
                     ))
                     .child(group("Launcher", "monitor"))
@@ -3106,7 +3256,7 @@ impl Launcher {
             .child(div().text_color(t.danger).child(tr("These mods will run with full access to your computer").to_string()))
             .child(tr("They can read, change or delete your files, and use your accounts and network, like any program you run. Build them only if you trust their authors: the Mods page names them.").to_string())
             .child(trf("Mods: {mods}", &[("mods", &list)]))
-            .child(tr("The build compiles the game: about ten minutes and a few GB of disk the first time, a few minutes after that.").to_string());
+            .child(tr("The build compiles the game: 20 to 30 minutes and a few GB of disk the first time (it downloads Rust), a few minutes after that.").to_string());
         let mut buttons = div().flex().gap(px(8.)).mt(px(4.));
         if mods.is_ok() {
             buttons = buttons.child(
@@ -3563,7 +3713,36 @@ impl Launcher {
             "Builds from GitHub. Each one installs into its own folder.",
             &t,
         );
-        let page = div().flex().flex_col().gap(px(32.)).child(header);
+        // Measured again when the installed versions change.
+        if self.disk_for != self.installed {
+            self.disk_for = self.installed.clone();
+            let (tags, tx) = (self.installed.clone(), self.tx.clone());
+            std::thread::spawn(move || {
+                let disk = tags.into_iter().map(|t| {
+                    let n = backend::disk_use(&t);
+                    (t, n)
+                });
+                let _ = tx.send(Msg::DiskUse(disk.collect()));
+            });
+        }
+        let on_disk = |tag: &String| {
+            let found = self.disk.iter().find(|(t, _)| t == tag);
+            found
+                .filter(|_| self.installed.contains(tag))
+                .map(|(_, n)| *n)
+        };
+        let used: u64 = self.installed.iter().filter_map(on_disk).sum();
+        let page = div()
+            .flex()
+            .flex_col()
+            .gap(px(32.))
+            .child(header)
+            .children((used > 0).then(|| {
+                text(theme::UI).text_color(t.muted).child(trf(
+                    "Installed versions use {size}.",
+                    &[("size", &megabytes(used))],
+                ))
+            }));
         let releases = match &self.releases {
             Load::Loading => return page.child(centered("Loading releases…", &t)),
             Load::Failed(e) => {
@@ -3600,6 +3779,9 @@ impl Launcher {
                 let mut meta = vec![release.date.clone()];
                 if let Some((_, size)) = release.asset {
                     meta.push(megabytes(size));
+                }
+                if let Some(n) = on_disk(&tag) {
+                    meta.push(trf("{size} on disk", &[("size", &megabytes(n))]));
                 }
                 let summary = release
                     .name
@@ -4303,6 +4485,21 @@ mod tests {
         assert_eq!(play_press(false, false), PlayPress::PrepareThenPlay);
         assert_eq!(play_press(true, true), PlayPress::Nothing);
         assert_eq!(play_press(false, true), PlayPress::Nothing);
+    }
+
+    /// A server's Join (and every other shortcut) waits like Play: not while the version's
+    /// first download and preparation run (#horizon-bugs, 0.2.23: a white window opened).
+    #[test]
+    fn shortcuts_start_only_when_play_would() {
+        use super::starts_now;
+        assert!(starts_now(true, false, false));
+        assert!(
+            !starts_now(false, true, false),
+            "first-time setup under way"
+        );
+        assert!(!starts_now(true, true, false), "prepared again under way");
+        assert!(!starts_now(false, false, false), "not prepared");
+        assert!(!starts_now(true, false, true), "already running");
     }
 
     #[test]

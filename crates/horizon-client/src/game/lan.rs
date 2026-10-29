@@ -342,9 +342,7 @@ fn mob_meta(
         meta.push((6, serializer::POSE, Value::Id(i32::from(pose))));
     }
     // LivingEntity.DATA_SLEEPING_POS_ID: the bed a sleeping villager lies in.
-    if horizon_client::mobs::villager::sleeping(m)
-        && let Some(bed) = m.extra.bed
-    {
+    if let Some(bed) = horizon_client::mobs::villager::sleeping_pos(m) {
         meta.push((14, serializer::OPTIONAL_BLOCK_POS, Value::OptPos(Some(bed))));
     }
     if let Some(name) = &m.custom_name {
@@ -2154,6 +2152,7 @@ impl Game<'_> {
                 .is_some_and(|s| s.data().is_some_and(|d| !d.charged.is_empty()));
             // ClientInformation.mainHand (HumanoidArm: 0 left, 1 right).
             m.extra.main_hand_left = g.info.main_hand == 0;
+            m.extra.hidden_model_parts = !g.info.model_customisation & 0x7F;
             // LivingEntity.DATA_EFFECT_PARTICLES: the swirls of its visible effects.
             let visible = || g.effects.list.iter().filter(|e| e.visible);
             m.extra.effect_particles = visible()
