@@ -1985,9 +1985,23 @@ pub fn split_args(line: &str) -> Vec<String> {
     words
 }
 
-/// The extra game arguments the player set in Settings, split into words.
+/// The render distance the low-memory setting launches the game with: chunk memory grows
+/// with its square, so 4 needs about a ninth of the default 12's.
+pub const LOW_MEMORY_RENDER_DISTANCE: &str = "4";
+
+/// The extra game arguments the player set in Settings, split into words, with the
+/// low-memory render distance added when it is on and the player set none of their own.
 pub fn game_args() -> Vec<String> {
-    split_args(&Settings::load().game_args)
+    game_args_with(&Settings::load())
+}
+
+fn game_args_with(settings: &Settings) -> Vec<String> {
+    let mut args = split_args(&settings.game_args);
+    if settings.low_memory && !args.iter().any(|a| a == "--render-distance") {
+        args.push("--render-distance".to_owned());
+        args.push(LOW_MEMORY_RENDER_DISTANCE.to_owned());
+    }
+    args
 }
 
 /// Appends the player's extra game arguments, so they add to the launcher's own or override them.
@@ -2903,6 +2917,11 @@ pub struct Settings {
     /// `auto_install` (off by default) for everyone, so this is a new key and that one is ignored.
     #[serde(default)]
     pub install_new_versions: Option<bool>,
+    /// The game release the player put off with "Later" on the Play page: it is not offered
+    /// or auto-installed again. A newer release installs under a different tag (a Nightly's
+    /// tag carries its date), so it is offered as usual.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub update_dismissed: Option<String>,
     /// Unset means on: after an install the launcher deletes the release versions nothing needs
     /// (`prune_old_versions`). Only a player who turned it off has `false` here.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2921,6 +2940,11 @@ pub struct Settings {
     /// default. Appended after the launcher's own arguments, so they can add to or override them.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub game_args: String,
+    /// Launch the game with a render distance of [`LOW_MEMORY_RENDER_DISTANCE`] unless the
+    /// player's own game arguments set one: for machines whose memory the game's default
+    /// render distance runs out of (integrated GPUs sharing system memory, small RAM).
+    #[serde(default)]
+    pub low_memory: bool,
     /// The HTTP proxy every download goes through (`proxy`), such as `http://127.0.0.1:7890`.
     /// Unset means none: the environment's `HTTPS_PROXY` and `HTTP_PROXY` apply instead.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -3015,6 +3039,11 @@ impl Settings {
     /// Whether new Horizon versions are installed automatically.
     pub fn auto_install(&self) -> bool {
         self.install_new_versions.unwrap_or(true)
+    }
+    /// Whether the update to `tag` may be offered and auto-installed: not when the player
+    /// put that release off with "Later" (`update_dismissed`).
+    pub fn update_offered(&self, tag: &str) -> bool {
+        self.update_dismissed.as_deref() != Some(tag)
     }
     /// Whether old versions are deleted after an install.
     pub fn auto_prune(&self) -> bool {
@@ -3850,6 +3879,33 @@ mod tests {
         let installed = ["v2026.10.12".to_string(), "v2026.10.1".to_string()];
         assert!(select_after_update(Some("v2026.10.12"), &installed));
         assert!(!select_after_update(Some("v2026.10.1"), &installed));
+    }
+
+    #[test]
+    fn a_put_off_update_is_not_offered_again_but_a_newer_one_is() {
+        let s = Settings::parse(r#"{"update_dismissed": "nightly-2026-10-28-0c02067"}"#);
+        assert!(!s.update_offered("nightly-2026-10-28-0c02067"));
+        assert!(s.update_offered("nightly-2026-10-29-5e391eb"));
+        assert!(Settings::parse("{}").update_offered("nightly-2026-10-28-0c02067"));
+        // Saving keeps the put-off release.
+        let off = Settings {
+            update_dismissed: Some("v2026.10.30".to_string()),
+            ..Settings::default()
+        };
+        assert!(
+            !Settings::parse(&serde_json::to_string(&off).unwrap()).update_offered("v2026.10.30")
+        );
+    }
+
+    #[test]
+    fn low_memory_adds_a_small_render_distance_unless_the_player_set_one() {
+        let on = Settings::parse(r#"{"low_memory": true}"#);
+        assert_eq!(game_args_with(&on), ["--render-distance", "4"]);
+        let own = Settings::parse(r#"{"low_memory": true, "game_args": "--render-distance 8"}"#);
+        assert_eq!(game_args_with(&own), ["--render-distance", "8"]);
+        let off = Settings::parse(r#"{"game_args": "--server-thread"}"#);
+        assert_eq!(game_args_with(&off), ["--server-thread"]);
+        assert!(!off.low_memory);
     }
 
     #[test]

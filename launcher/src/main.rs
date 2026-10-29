@@ -794,7 +794,12 @@ impl Launcher {
                 Msg::Updates(Ok(updates)) => {
                     self.update_error = None;
                     self.updates = *updates;
-                    if self.settings.auto_install() {
+                    let offered = self
+                        .updates
+                        .horizon
+                        .as_ref()
+                        .is_none_or(|r| self.settings.update_offered(&r.tag));
+                    if self.settings.auto_install() && offered {
                         self.install_update();
                     }
                     if let Some(release) = self.updates.launcher.clone() {
@@ -2836,39 +2841,59 @@ impl Launcher {
                     .text_color(t.ink_soft)
                     .child(line)
             }));
-        if let Some(release) = &self.updates.horizon {
-            let installing = self.installing.as_ref().filter(|(t, _)| *t == release.tag);
-            let line = div()
-                .flex()
-                .items_center()
-                .gap(px(10.))
-                .text_size(px(theme::CAPTION.px))
-                .text_color(t.muted)
-                .child(div().size(px(6.)).rounded_full().bg(t.accent))
-                .child(format!("{} available", update_name(release)));
-            hero = hero.child(match installing {
-                Some((_, p)) => line
-                    .child(
-                        div()
-                            .w(px(120.))
-                            .flex()
-                            .child(progress_bar(Some(self.bar), &t)),
-                    )
-                    .child(format!("{:.0}%", p * 100.)),
-                None => line.child(
-                    div()
-                        .id("install-update")
-                        .text_color(t.accent)
-                        .font_weight(FontWeight::MEDIUM)
-                        .cursor_pointer()
-                        .hover(|s| s.opacity(0.8))
-                        .child("Install")
-                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                            this.install_update();
-                            cx.notify();
-                        })),
-                ),
-            });
+        match &self.updates.horizon {
+            Some(release) if self.settings.update_offered(&release.tag) => {
+                let installing = self.installing.as_ref().filter(|(t, _)| *t == release.tag);
+                let line = div()
+                    .flex()
+                    .items_center()
+                    .gap(px(10.))
+                    .text_size(px(theme::CAPTION.px))
+                    .text_color(t.muted)
+                    .child(div().size(px(6.)).rounded_full().bg(t.accent))
+                    .child(format!("{} available", update_name(release)));
+                hero = hero.child(match installing {
+                    Some((_, p)) => line
+                        .child(
+                            div()
+                                .w(px(120.))
+                                .flex()
+                                .child(progress_bar(Some(self.bar), &t)),
+                        )
+                        .child(format!("{:.0}%", p * 100.)),
+                    None => line
+                        .child(
+                            div()
+                                .id("install-update")
+                                .text_color(t.accent)
+                                .font_weight(FontWeight::MEDIUM)
+                                .cursor_pointer()
+                                .hover(|s| s.opacity(0.8))
+                                .child("Install")
+                                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                    this.install_update();
+                                    cx.notify();
+                                })),
+                        )
+                        .child(
+                            div()
+                                .id("update-later")
+                                .text_color(t.muted)
+                                .font_weight(FontWeight::MEDIUM)
+                                .cursor_pointer()
+                                .hover(|s| s.opacity(0.8))
+                                .child(tr("Later"))
+                                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                    if let Some(r) = this.updates.horizon.clone() {
+                                        this.settings.update_dismissed = Some(r.tag);
+                                        this.settings.save();
+                                    }
+                                    cx.notify();
+                                })),
+                        ),
+                });
+            }
+            _ => {}
         }
         // Players who answered the first-run question before the ping existed read about it
         // once here.
@@ -2938,6 +2963,13 @@ impl Launcher {
                 cx.notify();
             },
         ));
+        let low_memory = switch("low-memory", self.settings.low_memory, &t).on_click(cx.listener(
+            |this, _: &ClickEvent, _, cx| {
+                this.settings.low_memory = !this.settings.low_memory;
+                this.settings.save();
+                cx.notify();
+            },
+        ));
         // Linux: the launcher's entry in the applications menu (`horizon_launcher::desktop`).
         let menu_entry = switch("desktop-entry", self.settings.desktop_entry(), &t).on_click(
             cx.listener(|this, _: &ClickEvent, _, cx| {
@@ -2962,7 +2994,7 @@ impl Launcher {
             .updates
             .horizon
             .as_ref()
-            .filter(|_| self.installing.is_none())
+            .filter(|r| self.installing.is_none() && self.settings.update_offered(&r.tag))
             .map(|_| {
                 button("settings-install", "Install", Kind::Secondary, &t)
                     .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
@@ -3118,6 +3150,15 @@ impl Launcher {
                     .child(self.proxy_row(n + 4, cx))
                     .child(group("Game", "gamepad"))
                     .child(self.game_args_row(n + 5, cx))
+                    .child(index_row(
+                        n + 5,
+                        tr("Low memory mode"),
+                        Some(plain(
+                            "Launches the game with a render distance of 4, so it fits in little memory.",
+                        )),
+                        Some(low_memory.into_any_element()),
+                        &t,
+                    ))
                     .child(self.native_mods_row(n + 5, cx))
                     .child(group("AI", "terminal"))
                     .child(self.no_ai_row(n + 6, cx))
