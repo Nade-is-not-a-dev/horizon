@@ -506,7 +506,7 @@ fn check(ep: &Endpoints, client_id: Option<&str>, account: &Account, secrets: Se
             Ok((mc, refresh)) => {
                 secrets = Secrets {
                     owns: secrets.owns,
-                    ..Secrets::new(refresh, mc)
+                    ..Secrets::new(refresh, mc, secrets.owns)
                 }
             }
             Err(e) => return Check::NoAnswer(e, secrets),
